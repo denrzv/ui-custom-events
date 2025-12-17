@@ -1,0 +1,75 @@
+@startuml
+actor Operator as U
+participant "MF A" as MFA
+participant "MF B" as MFB
+participant "Browser / Window" as W
+participant "API Gateway (Tyk)" as GW
+participant "Auth Platform (SSO)" as IDP
+participant "Backend\n(Spring Boot)" as BE
+
+autonumber
+
+== UI intent (untrusted) ==
+U -> MFA: User action
+MFA -> W: dispatch CustomEvent\ncrm:callback:intent
+note right of W
+CustomEvent = untrusted UI signal.
+Can be forged from DevTools / XSS.
+end note
+
+W -> MFB: Event delivered
+MFB -> MFB: Show intent + button
+
+== Capability issuance (user gesture) ==
+U -> MFB: Click "Perform callback"\n(user gesture)
+MFB -> GW: POST /capabilities\nAuthorization: Bearer <access_token>
+
+note right of GW
+Gateway concern:
+- token validation
+- coarse-grained policies (e.g., global rate limit per endpoint)
+end note
+
+GW -> IDP: Validate/Introspect access token\n(signature/exp/aud/jti*)
+note right of IDP
+If supported:
+- token anti-replay via jti revocation/blacklist
+- refresh/rotation policies
+end note
+IDP --> GW: token valid + user claims
+
+opt Gateway plugins (coarse-grained)
+  GW -> GW: Rate limit / quotas\n(usually per endpoint / consumer)
+end
+
+GW -> BE: Forward request\n+ user claims (headers)\n+ request body
+
+BE -> BE: RBAC check (role/scopes)
+BE -> BE: ABAC check (business context)
+BE -> BE: Fine-grained rate limit\n(per user/eventType/window)
+BE -> BE: Issue capability\n(exp=30s, jti, bind params)
+BE -> BE: Audit log (issued)
+
+BE --> GW: capability
+GW --> MFB: capability
+
+== Action execution ==
+MFB -> GW: POST /actions/callback\n(capability + params)\nAuthorization: Bearer <access_token>
+
+GW -> IDP: Validate/Introspect access token
+IDP --> GW: token valid + user claims
+
+opt Gateway plugins (coarse-grained)
+  GW -> GW: Rate limit / quotas
+end
+
+GW -> BE: Forward request\n+ user claims\n+ capability + params
+
+BE -> BE: Validate capability\n(exp, jti unused, binding)
+BE -> BE: RBAC/ABAC (defense-in-depth)
+BE -> BE: Execute action (callback)
+BE -> BE: Audit log (attempt/result)
+
+BE --> GW: OK / error
+GW --> MFB: Result
+@enduml
